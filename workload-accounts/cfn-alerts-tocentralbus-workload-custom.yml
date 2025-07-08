@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EventBridge Rule deployment with existing Lambda function
+
+Parameters:
+  pLambdaFunctionName:
+    Type: String
+    Description: Name of the existing Lambda function
+    Default: cloudwatch_alarms_resourcetags_enricher
+
+  pLambdaFunctionRoleName:
+    Type: String
+    Description: Name of the existing IAM Role for the Lambda function
+    Default: EventTagsEnricherLambdaExecutionRole
+
+  pEventRuleName:
+    Type: String
+    Description: Name of the EventBridge rule
+    Default: my-eventbridge-rule
+
+  pEventPattern:
+    Type: String
+    Description: Event pattern for the rule
+    Default: |
+      {
+        "detail-type": ["EC2 Instance State-change Notification", "CloudWatch Alarm State Change"],
+        "source": ["aws.ec2", "aws.cloudwatch"],
+        "detail": {
+          "$or": [{
+            "state": ["terminated", "stopped"]
+          },
+          {
+            "state": {
+              "value": ["ALARM", "OK"]
+            }
+          }]
+        }
+      }
+
+Resources:
+  rEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref pEventRuleName
+      Description: "EventBridge rule to trigger Lambda function"
+      EventPattern: !Ref pEventPattern
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${pLambdaFunctionName}
+          Id: "LambdaTarget"
+          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${pLambdaFunctionRoleName}
+
+
+Outputs:
+  EventRuleArn:
+    Description: ARN of the created EventBridge Rule
+    Value: !GetAtt rEventRule.Arn
+
+  EventRuleName:
+    Description: Name of the created EventBridge Rule
+    Value: !Ref rEventRule

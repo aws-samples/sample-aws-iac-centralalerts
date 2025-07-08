@@ -1,0 +1,107 @@
+# /* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0 */
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudWatch Alarm with Central Event Bus Integration
+
+Parameters:
+  pCentralEventBusName:
+    Type: String
+    Description: Name of the central event bus
+    Default: central_cwalarms_bus
+
+  pCentralAccountId:
+    Type: String
+    Description: AWS Account ID where central event bus is located
+    Default: '123456789012'
+
+  pCentralEventBusRegion:
+    Type: String
+    Description: Region where central event bus is located
+    Default: eu-west-2
+
+  pLambdaFunctionName:
+    Type: String
+    Description: Name of the Lambda function to enrich the event
+    Default: cloudwatch_alarms_resourcetags_enricher
+
+  pLambdaFunctionRoleName:
+    Type: String
+    Description: Name of the IAM Role for the Lambda function used to enrich event
+    Default: EventTagsEnricherLambdaExecutionRole
+
+Resources:
+
+  # IAM Role for Lambda function
+  rLambdaEventTagsEnricher:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref pLambdaFunctionRoleName
+      Description: IAM execution role for Lambda function to enrich cloudwatch alarm events with resource tags and send the enriched event to central alarm bus
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+              - events.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: EventBridgeToCentralBusRolePolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: logs:CreateLogGroup
+              Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:*'
+            - Effect: Allow
+              Action:
+                - tag:GetResources
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${pLambdaFunctionName}:*'
+            - Effect: Allow
+              Action: events:PutEvents
+              Resource: !Sub 'arn:aws:events:${pCentralEventBusRegion}:${pCentralAccountId}:event-bus/${pCentralEventBusName}'
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:${pLambdaFunctionName}'
+
+
+  # # IAM Role for EventBridge
+  # rEventBridgeRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     RoleName: CloudWatchToCentralEventBus
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service: events.amazonaws.com
+  #           Action: sts:AssumeRole
+  #     Policies:
+  #       - PolicyName: EventBridgeCentralBusPolicy
+  #         PolicyDocument:
+  #           Version: '2012-10-17'
+  #           Statement:
+  #             - Effect: Allow
+  #               Action: events:PutEvents
+  #               Resource: !Sub arn:aws:events:${pCentralEventBusRegion}:${pCentralAccountId}:event-bus/${pCentralEventBusName}
+
+Outputs:
+  # EventBridgeRoleArn:
+  #   Description: ARN of the EventBridge IAM Role
+  #   Value: !GetAtt EventBridgeRole.Arn
+
+  LambdaEventTagsEnricherArn:
+    Description: ARN of the Lambda IAM Role
+    Value:
+      Fn::GetAtt:    # Instead of !GetAtt
+        - rLambdaEventTagsEnricher
+        - Arn

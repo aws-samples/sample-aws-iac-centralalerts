@@ -1,93 +1,362 @@
-# terraform-aws-centralalerts
+# AWS Centralized Alerts Terraform Module
+
+[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](https://github.com/aws/mit-0)
+[![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A5%201.8.5-623CE4.svg)](https://www.terraform.io/)
+[![AWS Provider](https://img.shields.io/badge/AWS%20Provider-%E2%89%A5%205.70-FF9900.svg)](https://registry.terraform.io/providers/hashicorp/aws/latest)
+
+An IAC code repo with Terraform and Cloudformation for implementing a centralized alerting solution across multiple AWS accounts.
+
+## Overview
+
+This solution centralizes CloudWatch alarms and event notifications from multiple AWS accounts into a single monitoring account using EventBridge, Lambda, SQS, and SNS. It enriches alerts with resource tags and routes them to appropriate teams based on configurable rules.
+
+## Architecture
+
+![Architecture Diagram](./docs/central_cwalarms.drawio.png)
+
+### Components
+
+**Central Monitoring Account:**
+- Central Event Bus receives events from all workload accounts
+- Event Rules filter and route events based on patterns to appropriate targets
+- SQS Queue buffers events with Dead Letter Queue for error handling
+- SNS Enricher Lambda processes events and routes to team-specific SNS topics
+- Team SNS Topics distribute notifications via email subscriptions
+
+**Workload Accounts:**
+- Default Event Bus captures events from AWS resources
+- Event Rules filter relevant events pertaining to the AWS service it relates to.
+- Tags Enricher Lambda adds resource tag information before forwarding.
+
+## Event Flow
+
+1. Events are generated in workload accounts (CloudWatch alarms, EC2 state changes)
+2. Event rules filter and forward events to the Tags Enricher Lambda.
+3. The Lambda enriches events with resource tags and forwards to the central event bus.
+4. Central account event bus routes events to CloudWatch Logs and SQS queue.
+5. SNS Enricher Lambda processes events from queue and determines appropriate team SNS topic.
+6. Notifications are sent to team members via email subscriptions.
+
+## Benefits
+
+- Centralized monitoring across your AWS organization
+- Tag-based alert routing to appropriate teams
+- Context-rich notifications with resource information
+- Scalable architecture with error handling
+- Fully automated deployment with IaC
+
+## Prerequisites
+
+- A foundational understanding of how to utilize Terraform and CloudFormation.
+- AWS Organizations with central monitoring and workload accounts.
+- Terraform v1.8.5+
+- AWS CLI with appropriate permissions.
+- IAM permissions for both central and workload accounts.
 
 
+## Deployment
 
-## Getting started
+### Central Account Deployment
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+1. Navigate to the central-monitoring-account directory:
+   ```bash
+   cd terraform-aws-centralalerts/central-monitoring-account
+   ```
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+2. Copy the example configuration file:
+   ```bash
+   cp ../example.auto.tfvars .
+   ```
 
-## Add your files
+3. Edit the auto.tfvars file to replace placeholders with your actual values. The example file includes:
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+   ```hcl
+   # Region and EventBridge bus configuration
+   central_cwalarms_region = "eu-west-2"
+   central_cwalarms_busname = "central_cwalarms_bus"
+   central_cwalarms_eventtarget_role = "eventbridge_tosqs_role"
 
+   # Resource naming
+   central_cwalarms_eventbus_rule = "cwalarms_enriched"
+   central_cwalarms_loggroup_name = "cwalarms_enriched"
+   central_cwalarms_kms_alias = "alias/kms_cwalarms"
+   central_cwarlams_sqs_name = "cwalarms_queue"
+   central_cwalarm_deadletter_queue_name = "central_cwalarm_deadletter"
+
+   # Lambda configuration
+   sns_enricher_lambda_name = "cwalarms_sns_enricher"
+   sns_enricher_lambda_role = "cwalarms_sns_enricher_role"
+   timeout = 15
+   memory_size = 128
+   lambda_concurrent_executions = 50
+
+   # Team routing configuration
+   filter_data = {
+     "default" = {
+       Topic             = "default-alerts-topic"
+       sns_subscriptions = ["user1@example.com", "user2@example.com"]
+       Tags = {
+         Key   = ["Name"],
+         Value = ["default"]
+       }
+     }
+     "team-rule1" = {
+       Topic             = "mytopic"
+       sns_subscriptions = ["team1-user1@example.com", "team1-user2@example.com"]
+       Tags = {
+         Key   = ["Namespace", "Name"],
+         Value = ["app831test", "app831test_SINGLE_AZ_1"]
+       }
+     }
+   }
+   ```
+
+   Key areas to customize:
+   - Replace email addresses with your team's actual addresses
+   - Update S3 bucket name for code signing (`code_signing_bucket_name`)
+   - Customize team routing rules in `filter_data` based on your tagging strategy
+   - Adjust resource tags to match your organization's standards
+
+4. Deploy with Terraform:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+### Workload Account Deployment
+
+For each workload account:
+
+1. Deploy IAM role template:
+   ```bash
+   aws cloudformation deploy \
+     --template-file workload-accounts/cfn-cwalarms-tocentralbus-workloads-role.yml \
+     --stack-name central-alerts-role \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides \
+       pCentralEventBusName=central_cwalarms_bus \
+       pCentralAccountId=YOUR_CENTRAL_ACCOUNT_ID \
+       pCentralEventBusRegion=eu-west-2
+   ```
+
+2. Deploy event rules and Lambda function:
+   ```bash
+   aws cloudformation deploy \
+     --template-file workload-accounts/cfn-cwalarms-tocentralbus-workloads-rules.yml \
+     --stack-name central-alerts-rules \
+     --capabilities CAPABILITY_IAM \
+     --parameter-overrides \
+       pCentralEventBusName=central_cwalarms_bus \
+       pCentralAccountId=YOUR_CENTRAL_ACCOUNT_ID \
+       pCentralEventBusRegion=eu-west-2
+   ```
+
+3. (Optional) Deploy custom event rules to capture additional event types:
+   ```bash
+   aws cloudformation deploy \
+     --template-file workload-accounts/cfn-alerts-tocentralbus-workload-custom.yml \
+     --stack-name central-alerts-custom-events \
+     --capabilities CAPABILITY_IAM \
+     --parameter-overrides \
+       pEventRuleName=custom-events-rule \
+       pEventPattern="{\"source\": [\"aws.s3\"],\"detail-type\": [\"Object Created\"]}"
+   ```
+
+   See the "Adding New Event Types" section for more details on event patterns.
+
+## Customization
+
+### Adding New Event Types
+
+The solution handles CloudWatch Alarm and EC2 state changes by default. To add support for additional event types:
+
+1. Configure workload accounts to capture the new event types by deploying custom event rules:
+
+```bash
+aws cloudformation deploy \
+  --template-file workload-accounts/cfn-alerts-tocentralbus-workload-custom.yml \
+  --stack-name central-alerts-custom-events \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+    pEventRuleName=custom-events-rule \
+    pEventPattern="{\"source\": [\"aws.s3\"], \"detail-type\": [\"Object Created\"]}"
 ```
-cd existing_repo
-git remote add origin https://gitlab.aws.dev/klprabhu/terraform-aws-centralalerts.git
-git branch -M main
-git push -uf origin main
+
+### Enhancing Event Processing
+
+The solution processes events in two stages:
+
+1. **Workload Account (Tags Enricher)**: Extracts resource IDs from events, fetches resource tags, and enriches events before forwarding to the central account
+2. **Central Account (SNS Enricher)**: Routes the pre-enriched events to appropriate team SNS topics based on the tags
+
+#### Adding Support for New Event Types in Workload Accounts
+
+To support new event types, you need to modify the Tags Enricher Lambda in the workload accounts:
+
+1. Edit the Lambda function code in the CloudFormation template (`workload-accounts/cfn-cwalarms-tocentralbus-workloads-rules.yml`):
+
+```python
+# Find the resource_type and resource_id based on event type
+if event_type == "S3 Object Created":
+    # Extract S3 bucket and object information
+    resource_type = "s3"
+    bucket_name = event['detail']['bucket']['name']
+    resource_id = f"arn:aws:s3:::{bucket_name}"
+    monitored_resources.append(resource_id)
 ```
 
-## Integrate with your tools
+2. Deploy the updated CloudFormation template to all workload accounts:
 
-- [ ] [Set up project integrations](https://gitlab.aws.dev/klprabhu/terraform-aws-centralalerts/-/settings/integrations)
+```bash
+aws cloudformation deploy \
+  --template-file workload-accounts/cfn-cwalarms-tocentralbus-workloads-rules.yml \
+  --stack-name central-alerts-rules \
+  --capabilities CAPABILITY_IAM
+```
 
-## Collaborate with your team
+#### Adding Support for New Event Types in Central Account
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+To process the enriched events in the central account, add a handler to the SNS Enricher Lambda:
 
-## Test and Deploy
+1. Create a new handler file in the `central-monitoring-account/function/enrichers/` directory:
 
-Use the built-in continuous integration in GitLab.
+```python
+# Example: central-monitoring-account/function/enrichers/s3_events.py
+def s3_events_handler(message_body):
+    """Handler for S3 event notifications"""
+    # The event is already enriched with resource tags from the workload account
+    # Just format the notification message
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+    # Extract information from the enriched event
+    bucket_name = message_body["detail"]["detail"]["bucket"]["name"]
+    object_key = message_body["detail"]["detail"]["object"]["key"]
 
-***
+    # Get resource tags that were added by the workload account
+    resource_tags = message_body["detail"]["enriched"]["resource_tags"]
 
-# Editing this README
+    subject = f"S3 Event: {message_body['detail']['detail-type']}"
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+    message = "Greetings from S3 Events notifier ! \n \n"
+    message += f"S3 Event: {message_body['detail']['detail-type']} \n \n"
+    message += "Details:- \n \n"
+    message += f"Account:      {message_body['detail']['account']} \n"
+    message += f"Region:       {message_body['detail']['region']} \n"
+    message += f"Bucket:       {bucket_name} \n"
+    message += f"Object:       {object_key} \n"
+    message += f"Resource Tags: {resource_tags} \n"
 
-## Suggestions for a good README
+    return subject, message
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+2. Update the `lambda_handler.py` file to include your new handler:
 
-## Name
-Choose a self-explaining name for your project.
+```python
+# Add import at the top
+from enrichers.s3_events import s3_events_handler
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# Add condition in lambda_handler function
+elif event_type == "S3 Object Created" or event_type == "S3 Object Removed":
+    subject, message = s3_events_handler(message_body)
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+The `pEventPattern` parameter defines which events to capture using EventBridge pattern syntax. Here are some examples with more detailed patterns:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+- S3 object creation events:
+  ```json
+  {
+    "source": ["aws.s3"],
+    "detail-type": ["Object Created"],
+    "detail": {
+      "bucket": {
+        "name": ["my-important-bucket"]
+      },
+      "object": {
+        "key": [{
+          "prefix": "backups/"
+        }]
+      }
+    }
+  }
+  ```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+- EC2 instance state changes with specific instance types:
+  ```json
+  {
+    "source": ["aws.ec2"],
+    "detail-type": ["EC2 Instance State-change Notification"],
+    "detail": {
+      "state": ["stopped", "terminated"],
+      "instance-type": ["t2.micro", "t3.small"]
+    }
+  }
+  ```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+- CloudWatch Alarms for specific severity:
+  ```json
+  {
+    "source": ["aws.cloudwatch"],
+    "detail-type": ["CloudWatch Alarm State Change"],
+    "detail": {
+      "alarmName": [{
+        "prefix": "Critical-"
+      }],
+      "state": {
+        "value": ["ALARM"]
+      }
+    }
+  }
+  ```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+- Custom application events with filtering:
+  ```json
+  {
+    "source": ["custom.myapp"],
+    "detail-type": ["UserActivity"],
+    "detail": {
+      "actionType": ["login", "logout"],
+      "userType": ["admin"],
+      "region": ["us-east-1", "eu-west-1"]
+    }
+  }
+  ```
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Each event type may require a corresponding handler in the enricher Lambda to properly process and route the notifications.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+### Adding Team Routing Rules
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Update the `filter_data` variable in your tfvars file:
+```hcl
+"new-team" = {
+  Topic             = "new-team-topic"
+  sns_subscriptions = ["new-team@example.com"]
+  Tags = {
+    Key   = ["Department", "Environment"],
+    Value = ["Engineering", "Production"]
+  }
+}
+```
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Static Code Findings
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+The following static analysis warnings are intentionally ignored as they are low-impact and required by design.
+
+* **W28** (Line 46, `cfn-cwalarms-tocentralbus-workloads-role.yml`): Explicit IAM role naming for consistency
+* **W11** (Line 46, `cfn-cwalarms-tocentralbus-workloads-role.yml`): Wildcards required to read resource tags
+* **W89** (Line 155, `cfn-cwalarms-tocentralbus-workloads-rules.yml`): Lambda in VPC not required for AWS service access
+* **W58** (Line 155, `cfn-cwalarms-tocentralbus-workloads-rules.yml`): CloudWatch Logs permissions handled by execution role
+
+## Authors
+
+- [Prabhu Kanakamedala](https://github.com/klprabhu)
+- [Cheriyan Mundapuzha](https://github.com/jmcherian)
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+MIT No Attribution
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
